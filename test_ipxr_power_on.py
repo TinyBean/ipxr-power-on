@@ -48,7 +48,7 @@ class ContractTests(unittest.TestCase):
         self.cookie = Path(self.temp.name) / 'cookies.txt'
         self.calls = []
 
-    def run_flow(self, steps, *, cached=False, credentials=True, **kwargs):
+    def run_flow(self, steps, *, cached=False, credentials=True, query_status=False, **kwargs):
         self.cookie.unlink(missing_ok=True)
         if cached:
             jar = MozillaCookieJar(str(self.cookie))
@@ -78,13 +78,19 @@ class ContractTests(unittest.TestCase):
         defaults.update(kwargs)
         stdout = io.StringIO()
         with patch.dict(os.environ, {}, clear=True), patch.object(requests.Session, 'send', autospec=True, side_effect=transport), contextlib.redirect_stdout(stdout):
-            result = app.power_on(**defaults)
+            operation = app.power_status if query_status else app.power_on
+            result = operation(**defaults)
         self.assertEqual(stdout.getvalue(), '')
         self.assertEqual(pending, [])
         actions = [r for r, _ in self.calls if urlsplit(r.url).path == '/service-console/action']
         self.assertLessEqual(len(actions), 1)
+        endpoint = '/provision/default' if query_status else '/service-console/action'
+        if query_status:
+            self.assertEqual(actions, [])
+            self.assertIsNone(result.idempotency_key)
+            self.assertIsNone(result.request_no)
         for request, _ in self.calls:
-            self.assertIn(urlsplit(request.url).path, ['/login', '/servicedetail', '/service-console/action'])
+            self.assertIn(urlsplit(request.url).path, ['/login', '/servicedetail', endpoint])
         serialized = json.dumps(result.to_dict())
         for secret in ['private-test-password', 'test-cookie-secret', 'dynamic-test-token']:
             self.assertNotIn(secret, serialized)
@@ -226,6 +232,58 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(process.returncode, code)
             self.assertEqual(json.loads(process.stdout)['exit_code'], code)
             self.assertNotIn('never-echo-me', process.stdout + process.stderr)
+
+    def test_status_query_contract_and_states(self):
+        for state, expected in [('on', 'on'), ('off', 'off'), ('checking', 'process')]:
+            with self.subTest(state=state):
+                steps = [('GET', '/servicedetail', reply(DETAIL)),
+                         ('POST', '/provision/default', reply({'status': 200, 'data': {'status': state}}))]
+                result = self.run_flow(steps, cached=True, credentials=False, query_status=True)
+                self.assertEqual((result.status, result.exit_code), (expected, 0))
+                request, options = self.calls[-1]
+                self.assertEqual(parse_qs(request.body), {'id': ['10328'], 'func': ['status']})
+                self.assertEqual(request.headers['Origin'], app.BASE_URL)
+                self.assertEqual(request.headers['X-Requested-With'], 'XMLHttpRequest')
+                self.assertEqual(options['timeout'], (10, 45.0))
+
+    def test_status_login_then_query(self):
+        result = self.run_flow(fresh_login() + [
+            ('POST', '/provision/default', reply({'status': 200, 'data': {'status': 'on'}}))
+        ], query_status=True)
+        self.assertEqual((result.status, result.exit_code), ('on', 0))
+
+    def test_status_without_credentials_never_contacts_network(self):
+        result = self.run_flow([], credentials=False, query_status=True)
+        self.assertEqual((result.status, result.exit_code), ('auth_required', 2))
+
+    def test_status_errors_never_submit_or_retry(self):
+        cases = [
+            (reply('unauthorized', 401), 'auth_required', 2),
+            (reply(LOGIN), 'auth_required', 2),
+            (reply('', 307, {'Location': app.ACTION_URL}), 'unknown', 3),
+            (reply('bad gateway', 502), 'unknown', 3),
+            (reply('not json'), 'unknown', 3),
+            (reply({'status': 200, 'data': {}}), 'unknown', 3),
+            (requests.Timeout('private-test-password'), 'unknown', 3),
+        ]
+        for response, expected, code in cases:
+            with self.subTest(expected=expected, response=type(response).__name__):
+                result = self.run_flow([
+                    ('GET', '/servicedetail', reply(DETAIL)),
+                    ('POST', '/provision/default', response),
+                ], cached=True, credentials=False, query_status=True)
+                self.assertEqual((result.status, result.exit_code), (expected, code))
+
+    def test_check_status_cli_selects_read_only_operation(self):
+        result = app.PowerOnResult('off', '电源状态：已关机。', 10328, 0)
+        output = io.StringIO()
+        with patch.object(sys, 'argv', ['ipxr_power_on.py', '--check-status']), \
+                patch.object(app, 'power_status', return_value=result) as query, \
+                patch.object(app, 'power_on', side_effect=AssertionError('No power action allowed')), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(app.main(), 0)
+        query.assert_called_once()
+        self.assertEqual(json.loads(output.getvalue())['status'], 'off')
 
 
 if __name__ == '__main__':

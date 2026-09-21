@@ -1,8 +1,46 @@
-# IPXR 单次开机脚本
+# IPXR 电源查询与单次开机脚本
 
-面向 Python 3.10+ / Linux。每次运行只负责登录并为服务 `10328` 提交一次开机请求，可被其他程序调用。电源检测和后续决策由调用方负责。
+支持 Python 3.10+，默认服务 ID 为 `10328`。使用 `--check-status` 只查询电源状态；不带此参数会提交一次开机请求。开机后的状态检查和后续决策由调用方负责。
 
-## 安装与运行
+## Windows 查询电源状态
+
+本机可使用 uv 配置环境，在工程目录的 PowerShell 中执行：
+
+```powershell
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+```
+
+有已导出的 Netscape Cookie 文件时，可以直接查询：
+
+```powershell
+$env:PYTHONIOENCODING = 'utf-8'
+.\.venv\Scripts\python.exe ipxr_power_on.py --check-status --service-id 10328 --cookie-file .\cookies.txt
+```
+
+首次登录也可以在同一个 PowerShell 窗口中输入账号密码，密码输入时隐藏：
+
+```powershell
+$env:IPXR_USERNAME = Read-Host 'IPXR 登录邮箱'
+$securePassword = Read-Host 'IPXR 密码' -AsSecureString
+$credential = [System.Management.Automation.PSCredential]::new($env:IPXR_USERNAME, $securePassword)
+$env:IPXR_PASSWORD = $credential.GetNetworkCredential().Password
+$env:PYTHONIOENCODING = 'utf-8'
+try {
+    .\.venv\Scripts\python.exe ipxr_power_on.py --check-status --service-id 10328 --cookie-file .\cookies.txt
+} finally {
+    Remove-Item Env:IPXR_PASSWORD -ErrorAction SilentlyContinue
+    Remove-Variable credential, securePassword -ErrorAction SilentlyContinue
+}
+```
+
+成功登录后，会话保存到工程目录的 `cookies.txt`（已被 Git 忽略）。之后可重复执行只带 Cookie 的查询命令；若需要验证码，请按下文方式人工登录并导入 Cookie。
+
+查询成功返回 `status: on`（运行中）、`off`（已关机）或 `process`（处理中），退出码为 0。`auth_required` / 退出码 2 表示缺少有效会话；`unknown` / 退出码 3 表示查询未能确认电源状态。查询路径使用 `POST /provision/default`，表单参数为 `id=10328`、`func=status`，不会调用开机接口。
+
+Python 中可用 `from ipxr_power_on import power_status` 后调用 `power_status(service_id=10328, cookie_file="cookies.txt")`，返回字段与下文 `PowerOnResult` 一致，`request_no` 和 `idempotency_key` 为 null。
+
+## Linux 安装与开机
 
 在解压后的目录中执行（Debian/Ubuntu 若提示缺少 ensurepip，请先安装发行版的 python3-venv 软件包）：
 
@@ -94,7 +132,7 @@ if result.exit_code == 3:
 - 登录：先获取页面动态 token，再向 `POST /login?action=email` 提交表单。
 - 开机：`POST https://www.ipxr.cn/service-console/action`，JSON 为 `id=10328`、`host_id=10328`、`action="on"`、`params={}` 和唯一 `idempotency_key`。
 - 请求使用登录 Cookie，并设置同源 Origin、Referer。
-- 通过服务页标记验证身份和目标 ID，不调用电源状态、bootstrap、任务列表或任务轮询接口。
+- 开机流程通过服务页标记验证身份和目标 ID，不调用电源状态、bootstrap、任务列表或任务轮询接口。只有显式使用 `--check-status` 或 `power_status()` 才查询电源状态。
 - 开机 POST 禁止自动重试和自动跳转，不使用旧接口作为失败回退。每次函数调用/CLI 运行最多一次开机 POST。
 - 每次调用生成新的幂等键，它不能防止多次独立调用产生多个操作。调用方负责避免并发调用和不明确结果后的盲目重试。
 - 不创建计划任务、常驻服务或保活进程。此接口是网站前端实际使用的接口，网站改版后可能需要适配。
@@ -107,6 +145,10 @@ if result.exit_code == 3:
 
 测试会拦截所有 HTTP 请求，不会访问真实网站或开机。覆盖登录、Cookie 复用和失效、验证码、错误密码、接口受理/拒绝、未知结果、禁止重试/跳转、凭据不出现在结果、CLI JSON 和退出码，以及 Linux Cookie 权限。
 
-`verification.json` 记录真实验证的请求路径和结果，不含密码或 Cookie。其中 `power_state_checked` 固定为 false，表示未检查实际开机结果。
+Windows 运行测试：`.\.venv\Scripts\python.exe -m unittest -v test_ipxr_power_on.py`。新增查询测试覆盖状态映射、查询表单、认证失败、超时、禁止跳转/重试，以及 `--check-status` 不执行开机操作。
+
+真实验证记录不纳入版本控制，验证结果摘要如下。
 
 已完成的验证：21 项离线测试分别在 Windows/Python 3.12 和 Linux/Python 3.14.4 通过，包括 Linux Cookie 文件权限。真实验证仅发送了一次开机 POST，接口返回 HTTP 200、业务状态 200、任务状态 success；未查询实际电源状态。
+
+2026-09-21 在本机 Windows/Python 3.12.13 完成配置后，26 项离线测试通过。使用本地 `.env` 凭据注入本次查询进程，真实查询服务 `10328` 得到 `status=on`（运行中），HTTP 200、退出码 0，全程未提交开关机请求。该结果是查询时的状态。登录 Cookie 已保存到工程目录 `cookies.txt`，后续可直接使用上文带 `--check-status --cookie-file .\cookies.txt` 的命令查询。脚本本身仍不自动加载 `.env`。

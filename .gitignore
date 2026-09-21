@@ -1,6 +1,10 @@
 .venv/
+.uv-cache/
+.test-tmp/
 __pycache__/
 *.pyc
 .env
 *.cookies
 cookies.txt
+verification.json
+status-verification.json
