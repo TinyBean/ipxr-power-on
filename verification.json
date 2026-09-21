@@ -1,0 +1,30 @@
+{
+  "verified_at_utc": "2026-09-20T05:47:35.916857+00:00",
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/servicedetail"
+    },
+    {
+      "method": "POST",
+      "path": "/service-console/action"
+    }
+  ],
+  "result": {
+    "status": "accepted",
+    "message": "接口已接受开机请求；未检查实际电源状态。",
+    "service_id": 10328,
+    "exit_code": 0,
+    "request_no": "OPS20260920134736D40F350688",
+    "idempotency_key": "0ae14936-f085-431f-bdde-3ef5b4905ade"
+  },
+  "power_state_checked": false,
+  "provider_task_status": "success",
+  "offline_tests": {
+    "test_cases": 21,
+    "windows_python": "3.12",
+    "linux_python": "3.14.4",
+    "result": "passed",
+    "linux_cookie_permissions": "0600 verified"
+  }
+}
